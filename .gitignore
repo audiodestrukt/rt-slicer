@@ -1,0 +1,60 @@
+# Build directories
+build/
+Build/
+Builds/
+cmake-build-*/
+out/
+
+# IDE files
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
+
+# Compiled files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+
+# Plugin binaries
+*.vst
+*.vst3
+*.component
+*.aaxplugin
+
+# Projucer files (optional - keep if using Projucer)
+*.jucer.bak
+JuceLibraryCode/
+
+# macOS
+.DS_Store
+*.dSYM/
+xcuserdata/
+*.xcworkspace/
+
+# Windows
+Thumbs.db
+*.user
+*.suo
+*.vcxproj.filters
+*.vcxproj.user
+
+# JUCE (if cloned locally)
+JUCE/
+
+# Logs
+*.log
