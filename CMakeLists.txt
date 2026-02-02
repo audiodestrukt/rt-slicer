@@ -36,9 +36,12 @@ juce_add_plugin(${PROJECT_NAME}
     COPY_PLUGIN_AFTER_BUILD TRUE
     PLUGIN_MANUFACTURER_CODE ${PLUGIN_MANUFACTURER_CODE}
     PLUGIN_CODE ${PLUGIN_CODE}
-    FORMATS VST3 AU Standalone
+    FORMATS VST3 Standalone
     PRODUCT_NAME ${PLUGIN_NAME}
 )
+
+# Generate JuceHeader.h for legacy include style
+juce_generate_juce_header(${PROJECT_NAME})
 
 # Source files
 target_sources(${PROJECT_NAME}

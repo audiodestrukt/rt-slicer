@@ -112,12 +112,14 @@ public:
     juce::AudioParameterFloat* thresholdParam;
     juce::AudioParameterFloat* minSliceLengthParam;
     juce::AudioParameterFloat* maxSliceLengthParam;
-    
+
+    // Trigger a slice for playback (public for UI access)
+    void triggerSlice(int sliceIndex, float velocity);
+
 private:
     //==============================================================================
     void processIncomingAudio(const juce::AudioBuffer<float>& buffer);
     void processMidiMessages(juce::MidiBuffer& midiMessages);
-    void triggerSlice(int sliceIndex, float velocity);
     void recordAudioToSlice(const juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
     
     //==============================================================================
