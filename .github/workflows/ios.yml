@@ -29,11 +29,11 @@ env:
   # developed and tested against.
   JUCE_VERSION: 8.0.12
   DEVELOPMENT_TEAM: W527ZN3X52
-  XCODE_PROJECT: build-ios/AudioSlicerVST.xcodeproj
+  XCODE_PROJECT: build-ios/RipSlice.xcodeproj
   # JUCE names the container-app target <target>_Standalone and embeds
   # <target>_AUv3 into it as an app extension, so archiving this one scheme
   # produces both signed bundles.
-  SCHEME: AudioSlicerVST_Standalone
+  SCHEME: RipSlice_Standalone
 
 jobs:
   build-and-upload:
@@ -191,7 +191,7 @@ jobs:
         run: |
           xcodebuild -project "$XCODE_PROJECT" \
             -scheme "$SCHEME" -configuration Release \
-            -archivePath build/AudioSlicer.xcarchive archive \
+            -archivePath build/RipSlice.xcarchive archive \
             -destination 'generic/platform=iOS' \
             -allowProvisioningUpdates \
             -allowProvisioningDeviceRegistration \
@@ -207,7 +207,7 @@ jobs:
       - name: Verify the AUv3 extension is embedded
         if: steps.mode.outputs.upload == 'true'
         run: |
-          APP=$(find build/AudioSlicer.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -1)
+          APP=$(find build/RipSlice.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -1)
           echo "container: $APP"
           ls -la "$APP/PlugIns" || { echo "::error::No PlugIns directory — the AUv3 extension was not embedded"; exit 1; }
 
@@ -218,7 +218,7 @@ jobs:
           ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           xcodebuild -exportArchive \
-            -archivePath build/AudioSlicer.xcarchive \
+            -archivePath build/RipSlice.xcarchive \
             -exportOptionsPlist ios/ExportOptionsCI.plist \
             -allowProvisioningUpdates \
             -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \

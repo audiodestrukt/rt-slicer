@@ -13,7 +13,7 @@ if(SLICER_BUILD_VERSION STREQUAL "")
     set(SLICER_BUILD_VERSION "${SLICER_VERSION}")
 endif()
 
-project(AudioSlicerVST VERSION ${SLICER_VERSION})
+project(RipSlice VERSION ${SLICER_VERSION})
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -35,12 +35,12 @@ else()
 endif()
 
 # Plugin metadata
-set(PLUGIN_NAME "AudioSlicer")
+set(PLUGIN_NAME "RipSlice")
 # Four-character manufacturer code. Must be unique and start with a capital;
 # "Adsk" is Autodesk's and "Mnfr" was JUCE's placeholder. Changing this changes
 # the plugin's unique ID, so it has to settle BEFORE anything ships.
 set(PLUGIN_MANUFACTURER_CODE "Adst")
-set(PLUGIN_CODE "Slcr")
+set(PLUGIN_CODE "Rips")
 
 # iOS has no VST3; AUv3 is the only plugin format Apple allows, and it ships as
 # an app extension inside a container app, so the Standalone target is not
@@ -60,7 +60,11 @@ endif()
 juce_add_plugin(${PROJECT_NAME}
     COMPANY_NAME "Audiodestrukt"
     COMPANY_WEBSITE "https://audiodestrukt.com"
-    BUNDLE_ID "com.audiodestrukt.rtslicer"
+    # The AUv3 extension's bundle ID is derived by JUCE from the last
+    # dot-component of this one, giving com.audiodestrukt.ripslice.ripsliceAUv3.
+    # That is why the identifier is "ripslice" and not the "Rip.wav" wordmark --
+    # a dotted identifier would yield ...rip.wav.wavAUv3.
+    BUNDLE_ID "com.audiodestrukt.ripslice"
 
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT TRUE
@@ -79,7 +83,7 @@ juce_add_plugin(${PROJECT_NAME}
     # wants the microphone or iOS terminates it on first access.
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT
-        "AudioSlicer slices the audio coming into your device, so it needs access to your microphone and audio inputs."
+        "RipSlice slices the audio coming into your device, so it needs access to your microphone and audio inputs."
 
     # Keep processing when the host is foregrounded or the screen locks --
     # without this an AUv3 stops running as soon as the container app is

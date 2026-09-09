@@ -347,7 +347,7 @@ AudioSlicerAudioProcessorEditor::AudioSlicerAudioProcessorEditor(AudioSlicerAudi
     setSize(800, 700);
     
     // Title
-    titleLabel.setText("Audio Slicer VST", juce::dontSendNotification);
+    titleLabel.setText("RipSlice", juce::dontSendNotification);
     titleLabel.setFont(juce::Font(24.0f, juce::Font::bold));
     titleLabel.setJustificationType(juce::Justification::centred);
     titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
