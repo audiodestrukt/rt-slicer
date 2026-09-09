@@ -1,0 +1,232 @@
+name: iOS TestFlight
+
+# Builds the container app + its embedded AUv3 extension and uploads to
+# TestFlight on a release tag. macOS runners bill 10x on private repos (this one
+# is public, so they are free), and a build is a deliberate act either way, so
+# this does not run on every push.
+#
+#   git tag ios-v0.1.0 && git push origin ios-v0.1.0   ->  builds & uploads
+#
+# A manual dispatch defaults to a SIGNING-FREE validation build: it proves the
+# CMake -> Xcode generation, the JUCE pin, the AUv3 target and the generated
+# Info.plist all work on the runner without needing any secrets to be set. Tick
+# `upload` (or push a tag) for the real signed archive + TestFlight upload.
+on:
+  push:
+    tags:
+      - 'ios-v*'
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: 'Sign and upload to TestFlight (needs secrets); off = build-only validation'
+        type: boolean
+        default: false
+
+env:
+  # JUCE is not vendored or submoduled in this repo, so CI has to pin it
+  # explicitly -- an unpinned clone would build against whatever is on tip and
+  # would not match a local build. 8.0.12 is the version this project is
+  # developed and tested against.
+  JUCE_VERSION: 8.0.12
+  DEVELOPMENT_TEAM: W527ZN3X52
+  XCODE_PROJECT: build-ios/AudioSlicerVST.xcodeproj
+  # JUCE names the container-app target <target>_Standalone and embeds
+  # <target>_AUv3 into it as an app extension, so archiving this one scheme
+  # produces both signed bundles.
+  SCHEME: AudioSlicerVST_Standalone
+
+jobs:
+  build-and-upload:
+    # macos-26 ships Xcode 26 (iOS 26 SDK) -- App Store Connect rejects uploads
+    # built with anything older.
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Decide whether this run signs and uploads
+        id: mode
+        run: |
+          # A tag push always uploads; a manual dispatch only if asked.
+          if [[ "${{ github.ref_type }}" == "tag" || "${{ inputs.upload }}" == "true" ]]; then
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+            echo "Mode: signed archive + TestFlight upload"
+          else
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+            echo "Mode: build-only validation (no signing, no upload)"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Select latest Xcode (iOS 26 SDK)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Clone JUCE
+        run: git clone --depth 1 --branch "$JUCE_VERSION" https://github.com/juce-framework/JUCE.git JUCE
+
+      # Marketing version (x.y.z) from the tag (ios-v0.1.0 -> 0.1.0), else a
+      # placeholder for a manual dispatch. Build number = Unix epoch seconds:
+      # always large and monotonically increasing, so an older manual upload can
+      # never outrank it (TestFlight orders by build number).
+      - name: Compute version + build number
+        id: ver
+        run: |
+          REF="${{ github.ref_name }}"
+          if [[ "$REF" == ios-v* ]]; then
+            VERSION="${REF#ios-v}"
+          else
+            VERSION="0.0.1"
+          fi
+          BUILD=$(date -u +%s)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION (+$BUILD)"
+
+      # The App Store Connect API key drives the provisioning profile fetch and
+      # the TestFlight upload. The key's role must be App Manager or Admin.
+      # Same secret names as the other repos' iOS workflows.
+      - name: Install App Store Connect API key
+        if: steps.mode.outputs.upload == 'true'
+        env:
+          P8: ${{ secrets.APP_STORE_CONNECT_P8 }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          mkdir -p ~/private_keys
+          printf '%s' "$P8" > ~/private_keys/AuthKey_${KEY_ID}.p8
+
+      # Import BOTH persistent identities. `xcodebuild archive` with automatic
+      # signing signs the archive with a DEVELOPMENT identity (Distribution is
+      # applied at -exportArchive). If only the Distribution p12 is in the
+      # keychain, every run mints an "Apple Development: Created via API" cert
+      # and, after a handful of builds, archive fails with "Choose a certificate
+      # to revoke. Your account has reached the maximum number of certificates".
+      # With a Development identity present too, nothing is ever minted. Each
+      # secret pair is optional; with neither set, this falls back to cloud
+      # signing.
+      - name: Import signing certificates
+        if: steps.mode.outputs.upload == 'true'
+        env:
+          P12_B64: ${{ secrets.IOS_P12_BASE64 }}
+          P12_PASS: ${{ secrets.IOS_P12_PASSWORD }}
+          DEV_P12_B64: ${{ secrets.IOS_DEV_P12_BASE64 }}
+          DEV_P12_PASS: ${{ secrets.IOS_DEV_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12_B64" ] && [ -z "$DEV_P12_B64" ]; then
+            echo "No persistent cert secrets set — falling back to cloud-managed signing"
+            exit 0
+          fi
+          KC="$RUNNER_TEMP/ci-signing.keychain-db"
+          KC_PASS=$(uuidgen)
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          import_p12() { # $1=base64 $2=password $3=label
+            printf '%s' "$1" | base64 --decode > "$RUNNER_TEMP/$3.p12"
+            security import "$RUNNER_TEMP/$3.p12" -k "$KC" -P "$2" \
+              -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild
+            rm -f "$RUNNER_TEMP/$3.p12"
+            echo "imported $3 identity"
+          }
+          [ -n "$P12_B64" ]     && import_p12 "$P12_B64"     "$P12_PASS"     dist
+          [ -n "$DEV_P12_B64" ] && import_p12 "$DEV_P12_B64" "$DEV_P12_PASS" dev
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" > /dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          echo "KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning "$KC"
+
+      # There is no .xcodeproj in the repo -- CMake generates it, and JUCE
+      # generates the Info.plist from the CMake project properties. That is why
+      # the versions are passed here at CONFIGURE time rather than as
+      # MARKETING_VERSION/CURRENT_PROJECT_VERSION on the xcodebuild command
+      # line: those would not reach a generated plist.
+      - name: Configure (CMake -> Xcode project)
+        run: |
+          cmake -B build-ios -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            -DCMAKE_XCODE_GENERATE_SCHEME=ON \
+            -DSLICER_VERSION="${{ steps.ver.outputs.version }}" \
+            -DSLICER_BUILD_VERSION="${{ steps.ver.outputs.build }}"
+
+      # Diagnostic: if SCHEME above is wrong the archive fails with an unhelpful
+      # message, so print what actually exists. Cheap, and it makes the first
+      # run self-diagnosing.
+      - name: List available schemes
+        run: xcodebuild -list -project "$XCODE_PROJECT"
+
+      # Build-only validation. Compiles and links both the container app and the
+      # AUv3 extension for a real device slice and generates the Info.plists,
+      # with signing switched off so it needs no credentials at all.
+      - name: Build (validation, unsigned)
+        if: steps.mode.outputs.upload != 'true'
+        run: |
+          xcodebuild -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" -configuration Release \
+            -destination 'generic/platform=iOS' \
+            build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Show what the validation build produced
+        if: steps.mode.outputs.upload != 'true'
+        run: |
+          APP=$(find build-ios -maxdepth 4 -name '*.app' -type d | head -1)
+          echo "container app: $APP"
+          if [ -z "$APP" ]; then echo "::error::No .app produced"; exit 1; fi
+          echo "--- embedded extensions ---"
+          ls -la "$APP/PlugIns" || { echo "::error::AUv3 extension was not embedded"; exit 1; }
+          echo "--- container Info.plist (version + permissions) ---"
+          plutil -p "$APP/Info.plist" | grep -Ei 'BundleIdentifier|BundleVersion|ShortVersion|Microphone|UIBackgroundModes' || true
+          AUV3=$(find "$APP/PlugIns" -maxdepth 1 -name '*.appex' -type d | head -1)
+          echo "--- AUv3 Info.plist (bundle id + AU type) ---"
+          plutil -p "$AUV3/Info.plist" | grep -Ei 'BundleIdentifier|type|subtype|manufacturer|AudioComponents' -A2 || true
+
+      - name: Archive
+        if: steps.mode.outputs.upload == 'true'
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" -configuration Release \
+            -archivePath build/AudioSlicer.xcarchive archive \
+            -destination 'generic/platform=iOS' \
+            -allowProvisioningUpdates \
+            -allowProvisioningDeviceRegistration \
+            -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM"
+
+      # Confirms the extension really is nested in the container app. If this
+      # prints nothing the AUv3 was not embedded and the upload would silently
+      # be a standalone-only app.
+      - name: Verify the AUv3 extension is embedded
+        if: steps.mode.outputs.upload == 'true'
+        run: |
+          APP=$(find build/AudioSlicer.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -1)
+          echo "container: $APP"
+          ls -la "$APP/PlugIns" || { echo "::error::No PlugIns directory — the AUv3 extension was not embedded"; exit 1; }
+
+      - name: Export and upload to TestFlight
+        if: steps.mode.outputs.upload == 'true'
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath build/AudioSlicer.xcarchive \
+            -exportOptionsPlist ios/ExportOptionsCI.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID"
+
+      - name: Clean up key + keychain
+        if: always()
+        run: |
+          rm -rf ~/private_keys
+          if [ -n "$KEYCHAIN" ]; then security delete-keychain "$KEYCHAIN" || true; fi
