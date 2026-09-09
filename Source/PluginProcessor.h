@@ -100,6 +100,23 @@ public:
     //==============================================================================
     // Audio slice management
     static constexpr int maxSlices = 16;
+
+    // Ceiling on how much audio one slice can hold. This single constant governs
+    // BOTH the slice/recording buffer allocation and the upper bound of the
+    // "Max Slice Length" parameter, so the two can never disagree: a slice is
+    // copied out of the recording buffer using the parameter's value, so a
+    // parameter that outran the allocation would read past the end of it.
+    //
+    // Cost is maxSlices * seconds * 2ch * 4B * sampleRate (plus one more
+    // slice-sized recording buffer), so 10s at 48kHz is ~66MB -- fine for a
+    // desktop VST3, but far too much for an AUv3 extension, where the host may
+    // keep many plugins resident at once. iOS therefore gets a tighter ceiling
+    // (~13MB at 48kHz).
+#if JUCE_IOS
+    static constexpr float maxSliceSeconds = 2.0f;
+#else
+    static constexpr float maxSliceSeconds = 10.0f;
+#endif
     
     const AudioSlice& getSlice(int index) const { return slices[index]; }
     int getCurrentSliceIndex() const { return currentSliceIndex.load(); }

@@ -78,23 +78,11 @@ void SliceGridDisplay::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff1a1a1a));
     
-    auto bounds = getLocalBounds();
-    int sliceWidth = bounds.getWidth() / 4;
-    int sliceHeight = bounds.getHeight() / 4;
-    
     int currentSlice = audioProcessor.getCurrentSliceIndex();
-    
+
     for (int i = 0; i < AudioSlicerAudioProcessor::maxSlices; ++i)
     {
-        int row = i / 4;
-        int col = i % 4;
-        
-        auto sliceBounds = juce::Rectangle<int>(
-            col * sliceWidth, 
-            row * sliceHeight, 
-            sliceWidth - 2, 
-            sliceHeight - 2
-        );
+        auto sliceBounds = getSliceBounds(i);
         
         const auto& slice = audioProcessor.getSlice(i);
         
@@ -112,8 +100,8 @@ void SliceGridDisplay::paint(juce::Graphics& g)
 void SliceGridDisplay::drawSlice(juce::Graphics& g, const AudioSlice& slice, 
                                   juce::Rectangle<int> bounds, int sliceNumber)
 {
-    bounds = bounds.reduced(4);
-    
+    bounds = bounds.reduced(juce::jlimit(1, 4, bounds.getHeight() / 12));
+
     // Draw background based on state
     if (slice.isPlaying)
     {
@@ -139,29 +127,34 @@ void SliceGridDisplay::drawSlice(juce::Graphics& g, const AudioSlice& slice,
         auto waveformBounds = bounds.reduced(2).toFloat();
         int numSamples = slice.lengthSamples;
         auto* data = slice.buffer.getReadPointer(0);
-        
-        // Downsample for display
-        int displayWidth = waveformBounds.getWidth();
-        int samplesPerPixel = juce::jmax(1, numSamples / displayWidth);
-        
+
+        // Component coordinates are logical POINTS, but a Retina panel has 2-3
+        // physical pixels per point. Stepping the envelope one point at a time
+        // would throw away two thirds of the resolution an iPad can actually
+        // draw, so the envelope is computed per physical pixel and the path is
+        // plotted back in points.
+        const float pixelScale = g.getInternalContext().getPhysicalPixelScaleFactor();
+        const int displayWidth = juce::jmax(1, juce::roundToInt(waveformBounds.getWidth() * pixelScale));
+        const int samplesPerPixel = juce::jmax(1, numSamples / displayWidth);
+
         auto path = juce::Path();
         path.startNewSubPath(waveformBounds.getX(), waveformBounds.getCentreY());
-        
+
         for (int x = 0; x < displayWidth; ++x)
         {
             int sampleIndex = juce::jmin(x * samplesPerPixel, numSamples - 1);
-            
+
             float max = 0.0f;
             for (int i = 0; i < samplesPerPixel && (sampleIndex + i) < numSamples; ++i)
             {
                 max = juce::jmax(max, std::abs(data[sampleIndex + i]));
             }
-            
+
             float y = juce::jmap(max, 0.0f, 1.0f,
                                waveformBounds.getCentreY(),
                                waveformBounds.getY());
-            
-            path.lineTo(waveformBounds.getX() + x, y);
+
+            path.lineTo(waveformBounds.getX() + x / pixelScale, y);
         }
         
         // Mirror for bottom half
@@ -205,10 +198,20 @@ void SliceGridDisplay::drawSlice(juce::Graphics& g, const AudioSlice& slice,
     else if (sliceNumber % 12 == 10) midiNote = "A#" + juce::String((sliceNumber / 12) + 3) + " (" + juce::String(sliceNumber + 60) + ")";
     else if (sliceNumber % 12 == 11) midiNote = "B" + juce::String((sliceNumber / 12) + 3) + " (" + juce::String(sliceNumber + 60) + ")";
     
-    g.drawText(text, bounds.getX() + 4, bounds.getY() + 4, 40, 16, juce::Justification::left);
-    g.setFont(10.0f);
-    g.drawText(midiNote, bounds.getX() + 4, bounds.getBottom() - 18, bounds.getWidth() - 8, 14, 
-               juce::Justification::left);
+    // A cell shrinks with the view. Below ~44px there is no room for both the
+    // slot number and the MIDI note without them colliding, so the note -- the
+    // less useful of the two while playing -- is dropped first.
+    const bool showMidiNote = bounds.getHeight() >= 44;
+
+    g.setFont(juce::jlimit(9.0f, 12.0f, bounds.getHeight() / 4.0f));
+    g.drawText(text, bounds.getX() + 4, bounds.getY() + 2, 40, 16, juce::Justification::topLeft);
+
+    if (showMidiNote)
+    {
+        g.setFont(10.0f);
+        g.drawText(midiNote, bounds.getX() + 4, bounds.getBottom() - 18, bounds.getWidth() - 8, 14,
+                   juce::Justification::left);
+    }
     
     // Draw playback indicator
     if (slice.isPlaying)
@@ -234,22 +237,99 @@ void SliceGridDisplay::timerCallback()
     repaint();
 }
 
+// The one place the grid is divided. Cell n of `divisions` spans
+// [cellEdge(extent, n), cellEdge(extent, n + 1)), which tiles `extent` exactly
+// with no truncation gap.
+static int cellEdge(int extent, int index, int divisions)
+{
+    return extent * index / divisions;
+}
+
+// Inverse of cellEdge. Found by walking the same boundaries rather than by a
+// closed-form division: x * divisions / extent is NOT an exact inverse, and the
+// disagreement puts the boundary pixel of a cell in its neighbour. Walking is
+// correct by construction, and with four columns it is free.
+static int cellIndexAt(int extent, int position, int divisions)
+{
+    for (int i = divisions; --i > 0;)
+        if (position >= cellEdge(extent, i, divisions))
+            return i;
+
+    return 0;
+}
+
+juce::Rectangle<int> SliceGridDisplay::getSliceBounds(int sliceIndex) const
+{
+    auto bounds = getLocalBounds();
+    const int row = sliceIndex / gridColumns;
+    const int col = sliceIndex % gridColumns;
+
+    const int x1 = cellEdge(bounds.getWidth(),  col,     gridColumns);
+    const int x2 = cellEdge(bounds.getWidth(),  col + 1, gridColumns);
+    const int y1 = cellEdge(bounds.getHeight(), row,     gridRows);
+    const int y2 = cellEdge(bounds.getHeight(), row + 1, gridRows);
+
+    // The 2px inset is the gutter between pads; hit-testing deliberately does
+    // not apply it, so the gutter still triggers the pad it belongs to rather
+    // than being dead space under a fingertip.
+    return juce::Rectangle<int>(x1, y1, x2 - x1 - 2, y2 - y1 - 2);
+}
+
+int SliceGridDisplay::sliceIndexAt(juce::Point<int> position) const
+{
+    auto bounds = getLocalBounds();
+
+    if (bounds.isEmpty() || !bounds.contains(position))
+        return -1;
+
+    const int col = cellIndexAt(bounds.getWidth(),  position.x, gridColumns);
+    const int row = cellIndexAt(bounds.getHeight(), position.y, gridRows);
+
+    const int sliceIndex = row * gridColumns + col;
+
+    return sliceIndex < AudioSlicerAudioProcessor::maxSlices ? sliceIndex : -1;
+}
+
+void SliceGridDisplay::triggerFromEvent(const juce::MouseEvent& event)
+{
+    const int sourceIndex = event.source.getIndex();
+    const int sliceIndex = sliceIndexAt(event.getPosition());
+
+    // Only fire when this touch moves onto a different pad, so holding a finger
+    // still does not machine-gun the slice on every drag callback.
+    const auto previous = lastSliceForSource.find(sourceIndex);
+    if (previous != lastSliceForSource.end() && previous->second == sliceIndex)
+        return;
+
+    lastSliceForSource[sourceIndex] = sliceIndex;
+
+    if (sliceIndex < 0)
+        return;
+
+    // Pressure-sensitive where the hardware reports it (3D Touch / Apple
+    // Pencil); a plain mouse or a non-force touchscreen reports no pressure and
+    // plays at full velocity.
+    const float velocity = event.isPressureValid()
+                             ? juce::jlimit(0.05f, 1.0f, event.pressure)
+                             : 1.0f;
+
+    const_cast<AudioSlicerAudioProcessor&>(audioProcessor).triggerSlice(sliceIndex, velocity);
+}
+
 void SliceGridDisplay::mouseDown(const juce::MouseEvent& event)
 {
-    // Calculate which slice was clicked
-    auto bounds = getLocalBounds();
-    int sliceWidth = bounds.getWidth() / 4;
-    int sliceHeight = bounds.getHeight() / 4;
-    
-    int col = event.x / sliceWidth;
-    int row = event.y / sliceHeight;
-    int sliceIndex = row * 4 + col;
-    
-    if (sliceIndex >= 0 && sliceIndex < AudioSlicerAudioProcessor::maxSlices)
-    {
-        // Trigger the slice with full velocity
-        const_cast<AudioSlicerAudioProcessor&>(audioProcessor).triggerSlice(sliceIndex, 1.0f);
-    }
+    lastSliceForSource.erase(event.source.getIndex());
+    triggerFromEvent(event);
+}
+
+void SliceGridDisplay::mouseDrag(const juce::MouseEvent& event)
+{
+    triggerFromEvent(event);
+}
+
+void SliceGridDisplay::mouseUp(const juce::MouseEvent& event)
+{
+    lastSliceForSource.erase(event.source.getIndex());
 }
 
 //==============================================================================
@@ -259,6 +339,11 @@ AudioSlicerAudioProcessorEditor::AudioSlicerAudioProcessorEditor(AudioSlicerAudi
       waveformDisplay(p),
       sliceGridDisplay(p)
 {
+    // AUv3 hosts size the view themselves and will not honour a fixed size, so
+    // the editor has to be resizable and lay out from whatever it is given.
+    // The limits keep it usable rather than expressing a preference.
+    setResizable(true, true);
+    setResizeLimits(320, 240, 4096, 4096);
     setSize(800, 700);
     
     // Title
@@ -351,44 +436,78 @@ void AudioSlicerAudioProcessorEditor::paint(juce::Graphics& g)
 void AudioSlicerAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds().reduced(10);
-    
-    // Title
-    titleLabel.setBounds(bounds.removeFromTop(35));
-    bounds.removeFromTop(5);
-    
-    // Instructions
-    instructionsLabel.setBounds(bounds.removeFromTop(25));
-    bounds.removeFromTop(10);
-    
-    // Waveform display
-    waveformDisplay.setBounds(bounds.removeFromTop(100));
-    bounds.removeFromTop(10);
-    
-    // Slice grid (main area)
-    sliceGridDisplay.setBounds(bounds.removeFromTop(400));
-    bounds.removeFromTop(15);
-    
-    // Parameter controls
-    int labelWidth = 90;
-    int sliderHeight = 24;
-    int spacing = 8;
-    
-    auto sliderBounds = bounds.removeFromTop(sliderHeight);
-    sliderBounds.removeFromLeft(labelWidth);
-    sensitivitySlider.setBounds(sliderBounds);
-    
-    bounds.removeFromTop(spacing);
-    sliderBounds = bounds.removeFromTop(sliderHeight);
-    sliderBounds.removeFromLeft(labelWidth);
-    thresholdSlider.setBounds(sliderBounds);
-    
-    bounds.removeFromTop(spacing);
-    sliderBounds = bounds.removeFromTop(sliderHeight);
-    sliderBounds.removeFromLeft(labelWidth);
-    minLengthSlider.setBounds(sliderBounds);
-    
-    bounds.removeFromTop(spacing);
-    sliderBounds = bounds.removeFromTop(sliderHeight);
-    sliderBounds.removeFromLeft(labelWidth);
-    maxLengthSlider.setBounds(sliderBounds);
+
+    // A fingertip needs a far larger target than a mouse pointer; 44pt is
+    // Apple's minimum comfortable hit target.
+   #if JUCE_IOS
+    const int sliderHeight = 44;
+   #else
+    const int sliderHeight = 24;
+   #endif
+    const int spacing = 8;
+
+    const int fullHeight = bounds.getHeight();
+
+    // Reserve the controls from the BOTTOM first, then let the slice grid take
+    // whatever is left. Laying out top-down with a fixed 400px grid meant that
+    // in a short view -- which is exactly what an AUv3 host hands you -- the
+    // grid ate the remaining space and the sliders fell off the bottom.
+    //
+    // The controls also never take more than 40% of the view: at their natural
+    // height four sliders are half of a 240px host view, which starved the grid
+    // down to an unusable strip. Below that they compress instead.
+    const int naturalControls = 4 * sliderHeight + 3 * spacing;
+    const int controlsHeight  = juce::jmin(naturalControls, fullHeight * 2 / 5);
+    const int rowHeight       = juce::jmax(14, (controlsHeight - 3 * spacing) / 4);
+
+    auto controls = bounds.removeFromBottom(controlsHeight);
+    bounds.removeFromBottom(juce::jmin(15, fullHeight / 20));
+
+    // Chrome drops progressively as the view shrinks, cheapest first, so the
+    // grid keeps as much of the space as it can.
+    if (fullHeight > 380)
+    {
+        titleLabel.setVisible(true);
+        titleLabel.setBounds(bounds.removeFromTop(35));
+        bounds.removeFromTop(5);
+    }
+    else
+    {
+        titleLabel.setVisible(false);
+    }
+
+    const bool showInstructions = fullHeight > 480;
+    instructionsLabel.setVisible(showInstructions);
+    if (showInstructions)
+    {
+        instructionsLabel.setBounds(bounds.removeFromTop(25));
+        bounds.removeFromTop(10);
+    }
+
+    const bool showWaveform = fullHeight > 320;
+    waveformDisplay.setVisible(showWaveform);
+    if (showWaveform)
+    {
+        waveformDisplay.setBounds(bounds.removeFromTop(juce::jlimit(40, 100, bounds.getHeight() / 5)));
+        bounds.removeFromTop(10);
+    }
+
+    // Everything that is left belongs to the grid -- it is the instrument.
+    sliceGridDisplay.setBounds(bounds);
+
+    // Labels are attached to the left of each slider, so the sliders are inset
+    // to leave room for them. A narrow view cannot afford the full inset.
+    const int labelWidth = bounds.getWidth() < 520 ? 64 : 90;
+    auto layoutSlider = [&](juce::Slider& slider)
+    {
+        auto row = controls.removeFromTop(rowHeight);
+        row.removeFromLeft(labelWidth);
+        slider.setBounds(row);
+        controls.removeFromTop(spacing);
+    };
+
+    layoutSlider(sensitivitySlider);
+    layoutSlider(thresholdSlider);
+    layoutSlider(minLengthSlider);
+    layoutSlider(maxLengthSlider);
 }

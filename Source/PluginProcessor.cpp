@@ -82,7 +82,8 @@ AudioSlicerAudioProcessor::AudioSlicerAudioProcessor()
         "minLength", "Min Slice Length", 0.01f, 2.0f, 0.1f));
     
     addParameter(maxSliceLengthParam = new juce::AudioParameterFloat(
-        "maxLength", "Max Slice Length", 0.1f, 10.0f, 4.0f));
+        "maxLength", "Max Slice Length", 0.1f, maxSliceSeconds,
+        juce::jmin(4.0f, maxSliceSeconds)));
     
     // Initialize slices
     for (auto& slice : slices)
@@ -152,8 +153,10 @@ void AudioSlicerAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
     
     transientDetector.prepare(sampleRate);
     
-    // Prepare recording buffer (10 seconds max per slice)
-    int maxSamples = static_cast<int>(sampleRate * 10.0);
+    // Prepare recording buffer. Sized from maxSliceSeconds, the same constant
+    // that bounds the Max Slice Length parameter, so a slice can never be
+    // longer than the buffer it is copied out of.
+    int maxSamples = static_cast<int>(sampleRate * maxSliceSeconds);
     recordingBuffer.setSize(2, maxSamples);
     recordingBuffer.clear();
     
@@ -344,7 +347,15 @@ void AudioSlicerAudioProcessor::recordAudioToSlice(const juce::AudioBuffer<float
 {
     int sliceIdx = currentSliceIndex.load();
     auto& slice = slices[sliceIdx];
-    
+
+    // Never copy more than either buffer holds -- the source is the recording
+    // buffer and the destination the slice, both sized from maxSliceSeconds.
+    numSamples = juce::jmin(numSamples,
+                            buffer.getNumSamples() - startSample,
+                            slice.buffer.getNumSamples());
+    if (numSamples <= 0)
+        return;
+
     slice.lengthSamples = numSamples;
     slice.startSample = startSample;
     slice.playbackPosition = 0;
@@ -442,7 +453,11 @@ void AudioSlicerAudioProcessor::setStateInformation(const void* data, int sizeIn
         *sensitivityParam = tree.getProperty("sensitivity", 0.5f);
         *thresholdParam = tree.getProperty("threshold", -20.0f);
         *minSliceLengthParam = tree.getProperty("minLength", 0.1f);
-        *maxSliceLengthParam = tree.getProperty("maxLength", 4.0f);
+
+        // Clamp: a preset written by a build with a larger maxSliceSeconds (the
+        // desktop VST3) can carry a maxLength this build cannot accommodate.
+        *maxSliceLengthParam = juce::jlimit(0.1f, maxSliceSeconds,
+                                            (float)tree.getProperty("maxLength", 4.0f));
     }
 }
 
