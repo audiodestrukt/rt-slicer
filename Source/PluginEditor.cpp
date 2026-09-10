@@ -86,14 +86,26 @@ void SliceGridDisplay::paint(juce::Graphics& g)
         
         const auto& slice = audioProcessor.getSlice(i);
         
-        // Highlight current recording slice
-        if (i == currentSlice)
+        // Highlight the slot being recorded into -- but not while capture is
+        // blocked, when there is no such slot and the highlight would be
+        // claiming something untrue.
+        if (i == currentSlice && !audioProcessor.isCaptureBlocked())
         {
             g.setColour(juce::Colours::orange.withAlpha(0.3f));
             g.fillRect(sliceBounds);
         }
         
         drawSlice(g, slice, sliceBounds, i);
+    }
+
+    // Every pad frozen means capture has stopped. Say so structurally rather
+    // than with text, which would not survive the smallest layouts: the grid
+    // gets an orange-red frame, and no pad carries the orange recording
+    // highlight, because there is no slot being recorded into.
+    if (audioProcessor.isCaptureBlocked())
+    {
+        g.setColour(juce::Colour(0xffff3c00));
+        g.drawRect(getLocalBounds(), juce::jmax(2, getHeight() / 60));
     }
 }
 
@@ -223,9 +235,30 @@ void SliceGridDisplay::drawSlice(juce::Graphics& g, const AudioSlice& slice,
         g.fillRect(bounds.getX(), bounds.getBottom() - 3, progressWidth, 3);
     }
     
-    // Draw border
-    g.setColour(slice.isActive ? juce::Colours::white.withAlpha(0.5f) : juce::Colours::grey.withAlpha(0.3f));
-    g.drawRect(bounds, 1);
+    // Draw border. A frozen pad gets the brand lime at full strength and a
+    // thicker stroke -- weight survives being small and glanced at, where a hue
+    // change alone does not.
+    if (slice.isFrozen.load())
+    {
+        const int thickness = juce::jmax(2, bounds.getHeight() / 22);
+        g.setColour(juce::Colour(0xffc8ff00));
+        g.drawRect(bounds, thickness);
+
+        // Corner tab, so frozen is still distinguishable if the border is
+        // clipped by a very small pad.
+        const int tab = juce::jmax(5, bounds.getHeight() / 7);
+        juce::Path corner;
+        corner.startNewSubPath((float) bounds.getRight(), (float) bounds.getY());
+        corner.lineTo((float) bounds.getRight(), (float) bounds.getY() + tab);
+        corner.lineTo((float) bounds.getRight() - tab, (float) bounds.getY());
+        corner.closeSubPath();
+        g.fillPath(corner);
+    }
+    else
+    {
+        g.setColour(slice.isActive ? juce::Colours::white.withAlpha(0.5f) : juce::Colours::grey.withAlpha(0.3f));
+        g.drawRect(bounds, 1);
+    }
 }
 
 void SliceGridDisplay::resized()
@@ -234,6 +267,18 @@ void SliceGridDisplay::resized()
 
 void SliceGridDisplay::timerCallback()
 {
+    // Long presses are resolved here rather than with a timer per touch, since
+    // this already runs for the repaint.
+    const auto now = juce::Time::currentTimeMillis();
+    for (auto& [source, hold] : holdForSource)
+    {
+        if (!hold.fired && now - hold.startMs >= holdToFreezeMs)
+        {
+            hold.fired = true;
+            const_cast<AudioSlicerAudioProcessor&>(audioProcessor).toggleFreeze(hold.slice);
+        }
+    }
+
     repaint();
 }
 
@@ -318,18 +363,35 @@ void SliceGridDisplay::triggerFromEvent(const juce::MouseEvent& event)
 
 void SliceGridDisplay::mouseDown(const juce::MouseEvent& event)
 {
-    lastSliceForSource.erase(event.source.getIndex());
+    const int source = event.source.getIndex();
+    lastSliceForSource.erase(source);
     triggerFromEvent(event);
+
+    // Arm the hold. The pad has already played -- you hear the slice, then keep
+    // it by continuing to hold, which is the right order for deciding whether
+    // it is worth keeping.
+    const int sliceIndex = sliceIndexAt(event.getPosition());
+    if (sliceIndex >= 0)
+        holdForSource[source] = { sliceIndex, juce::Time::currentTimeMillis(), false };
 }
 
 void SliceGridDisplay::mouseDrag(const juce::MouseEvent& event)
 {
+    // Moving off the pad the touch started on means this is a drag, not a
+    // hold.
+    const int source = event.source.getIndex();
+    auto held = holdForSource.find(source);
+    if (held != holdForSource.end() && sliceIndexAt(event.getPosition()) != held->second.slice)
+        holdForSource.erase(held);
+
     triggerFromEvent(event);
 }
 
 void SliceGridDisplay::mouseUp(const juce::MouseEvent& event)
 {
-    lastSliceForSource.erase(event.source.getIndex());
+    const int source = event.source.getIndex();
+    lastSliceForSource.erase(source);
+    holdForSource.erase(source);
 }
 
 //==============================================================================

@@ -17,7 +17,12 @@ struct AudioSlice
     int playbackPosition = 0;
     bool isPlaying = false;
     float gain = 1.0f;
-    
+
+    // Set from the UI thread, read by the audio thread on every slot advance.
+    // A frozen slot is skipped by capture, so its audio survives however many
+    // times the recording wraps around the grid.
+    std::atomic<bool> isFrozen{false};
+
     void clear()
     {
         buffer.clear();
@@ -26,6 +31,10 @@ struct AudioSlice
         isActive = false;
         playbackPosition = 0;
         isPlaying = false;
+
+        // clear() discards the audio, so keeping it frozen would preserve
+        // nothing.
+        isFrozen = false;
     }
 };
 
@@ -133,15 +142,32 @@ public:
     // Trigger a slice for playback (public for UI access)
     void triggerSlice(int sliceIndex, float velocity);
 
+    // Freeze/unfreeze a slot from the UI. Freezing the slot currently being
+    // recorded into moves capture on immediately, so the take you just liked is
+    // what gets kept.
+    void toggleFreeze(int sliceIndex);
+    bool isSliceFrozen(int sliceIndex) const { return slices[sliceIndex].isFrozen.load(); }
+
+    // True when every slot is frozen and there is therefore nowhere left to
+    // record. The UI must show this: capture stopping silently would look like
+    // a broken app.
+    bool isCaptureBlocked() const { return captureBlocked.load(); }
+
 private:
     //==============================================================================
     void processIncomingAudio(const juce::AudioBuffer<float>& buffer);
     void processMidiMessages(juce::MidiBuffer& midiMessages);
     void recordAudioToSlice(const juce::AudioBuffer<float>& buffer, int startSample, int numSamples);
+
+    // Move capture to the next slot that is not frozen, wrapping around.
+    // Returns false when all slots are frozen, leaving currentSliceIndex where
+    // it was and setting captureBlocked.
+    bool advanceToNextRecordableSlot();
     
     //==============================================================================
     std::array<AudioSlice, maxSlices> slices;
     std::atomic<int> currentSliceIndex{0};
+    std::atomic<bool> captureBlocked{false};
     
     TransientDetector transientDetector;
     

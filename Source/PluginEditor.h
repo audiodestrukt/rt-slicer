@@ -68,6 +68,14 @@ private:
     // retrigger tracking of another.
     std::map<int, int> lastSliceForSource;
 
+    // Long-press to freeze. A touch that stays on the pad it started on for
+    // holdToFreezeMs toggles that pad's frozen state. Tracked per source, and
+    // abandoned as soon as the touch moves to another pad, so it cannot fire
+    // during a drag across the grid.
+    static constexpr int holdToFreezeMs = 500;
+    struct Hold { int slice; juce::int64 startMs; bool fired; };
+    std::map<int, Hold> holdForSource;
+
     AudioSlicerAudioProcessor& audioProcessor;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SliceGridDisplay)

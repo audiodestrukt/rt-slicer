@@ -190,6 +190,7 @@ void AudioSlicerAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
     
     recordingPosition = 0;
     isRecording = true;
+    captureBlocked = false;
 }
 
 void AudioSlicerAudioProcessor::releaseResources()
@@ -293,6 +294,12 @@ void AudioSlicerAudioProcessor::processIncomingAudio(const juce::AudioBuffer<flo
 {
     if (!isRecording)
         return;
+
+    // Every slot frozen means there is nowhere to put a new slice. Stop
+    // capturing rather than quietly overwriting something the player asked to
+    // keep. Visualisation keeps running, so the app still looks alive.
+    if (captureBlocked.load())
+        return;
     
     int numSamples = buffer.getNumSamples();
     auto* leftChannel = buffer.getReadPointer(0);
@@ -312,10 +319,10 @@ void AudioSlicerAudioProcessor::processIncomingAudio(const juce::AudioBuffer<flo
             {
                 // Store the slice
                 recordAudioToSlice(recordingBuffer, 0, currentSliceSamples);
-                
-                // Move to next slice
-                currentSliceIndex = (currentSliceIndex.load() + 1) % maxSlices;
-                
+
+                // Move to the next slot that is not frozen
+                advanceToNextRecordableSlot();
+
                 // Reset recording
                 recordingPosition = 0;
                 currentSliceSamples = 0;
@@ -348,7 +355,7 @@ void AudioSlicerAudioProcessor::processIncomingAudio(const juce::AudioBuffer<flo
                 if (currentSliceSamples >= maxSamples)
                 {
                     recordAudioToSlice(recordingBuffer, 0, currentSliceSamples);
-                    currentSliceIndex = (currentSliceIndex.load() + 1) % maxSlices;
+                    advanceToNextRecordableSlot();
                     recordingPosition = 0;
                     currentSliceSamples = 0;
                 }
@@ -362,6 +369,11 @@ void AudioSlicerAudioProcessor::recordAudioToSlice(const juce::AudioBuffer<float
 {
     int sliceIdx = currentSliceIndex.load();
     auto& slice = slices[sliceIdx];
+
+    // Belt and braces: a frozen slot is never written, even if the index
+    // somehow points at one.
+    if (slice.isFrozen.load())
+        return;
 
     // Never copy more than either buffer holds -- the source is the recording
     // buffer and the destination the slice, both sized from maxSliceSeconds.
@@ -403,6 +415,54 @@ void AudioSlicerAudioProcessor::processMidiMessages(juce::MidiBuffer& midiMessag
                 triggerSlice(sliceIndex, velocity);
             }
         }
+    }
+}
+
+bool AudioSlicerAudioProcessor::advanceToNextRecordableSlot()
+{
+    const int start = currentSliceIndex.load();
+
+    for (int step = 1; step <= maxSlices; ++step)
+    {
+        const int candidate = (start + step) % maxSlices;
+
+        if (!slices[candidate].isFrozen.load())
+        {
+            currentSliceIndex = candidate;
+            captureBlocked = false;
+            return true;
+        }
+    }
+
+    // Every slot is frozen. Leave the index alone and let processIncomingAudio
+    // stop; unfreezing anything clears this.
+    captureBlocked = true;
+    return false;
+}
+
+void AudioSlicerAudioProcessor::toggleFreeze(int sliceIndex)
+{
+    if (sliceIndex < 0 || sliceIndex >= maxSlices)
+        return;
+
+    auto& slice = slices[sliceIndex];
+    const bool nowFrozen = !slice.isFrozen.load();
+    slice.isFrozen = nowFrozen;
+
+    if (!nowFrozen)
+    {
+        // Unfreezing always makes room again.
+        captureBlocked = false;
+        return;
+    }
+
+    // Freezing the slot being recorded into: keep what is already there and
+    // move capture on, rather than continuing to write over it.
+    if (sliceIndex == currentSliceIndex.load())
+    {
+        advanceToNextRecordableSlot();
+        recordingPosition = 0;
+        currentSliceSamples = 0;
     }
 }
 
