@@ -39,7 +39,77 @@ the record loop by `metadata.samplePosition`. An afternoon, not a rewrite.
 
 ---
 
-## 2. Stem slicing
+## 2. Freezing, cycling and layering
+
+Three connected ideas, and together they change the app's basic loop from
+"endlessly overwriting" to "curate while you play".
+
+### Freeze a slot
+
+Mark a slot as keep. Capture then **skips frozen slots** when it advances, so
+good material survives while the rest keeps cycling. This is the single highest
+value-per-line item on the list.
+
+- Per-slice `isFrozen`, atomic — the UI thread toggles it, the audio thread
+  reads it. `currentSliceIndex` advance skips frozen slots.
+- **Gesture: long-press a pad.** Adds no chrome, and the grid is already the
+  whole interface.
+- Frozen pads need to look obviously different — this is state you must be able
+  to read mid-performance at arm's length.
+- **Edge case with teeth:** all 16 frozen means there is nowhere to record.
+  Capture must visibly pause rather than silently stop. Decide and show it.
+- Freezing over MIDI fits the MIDI-control theme (see 1).
+
+**The fork to settle first — what does "for use later" mean?** Nothing about
+the audio is persisted today; `getStateInformation` saves four parameter values
+and no samples. Within-session freezing is easy. Surviving an app restart means
+writing ~13 MB of audio somewhere: in an AUv3's state blob that is abusive to
+the host, so on iOS it wants the app's Documents folder, which drags in file
+management — a real threat to "no setup". **These are different features.
+Decide which one is meant before building either.**
+
+### Layer instead of overwrite
+
+Rather than replacing an unfrozen slot, mix the new audio into what is already
+there, so repeated passes accumulate density. Composes exactly with freeze:
+frozen slots are locked, unfrozen ones evolve.
+
+Worth a **decay amount** so older layers fade as new ones arrive — the tape-loop
+regeneration idea. Without it everything silts up into mud within a few passes.
+One knob, and it turns the whole grid into an instrument that drifts as you
+play it.
+
+**Simplicity check:** passes if it is the *default* behaviour of cycling rather
+than a mode you switch into.
+
+---
+
+## 3. Slices that land on usable trigger samples
+
+The detector was outright broken until 2026-09-09 — the cooldown ran 64x too
+long and hits after silence were undetectable, so 2 of 40 test hits registered.
+That is fixed (40 of 40), and **much of what felt like poor slice-point
+selection was simply deafness.** Re-listen before building anything below.
+
+What remains, in descending order of how much it affects whether a slice is
+playable:
+
+- **Backtrack to the onset.** A transient is detected *after* energy has risen,
+  so the attack's first milliseconds land at the end of the *previous* slice.
+  Clipped attacks are the classic reason sliced hits feel weak. At detection,
+  walk back through the recording buffer to the local energy minimum and cut
+  there.
+- **Snap to zero crossings, plus a 1-3 ms fade at each end.** Removes clicks at
+  slice boundaries.
+- **Trim trailing silence** so a pad's length matches its sound.
+- **Reject junk.** A near-silent or too-short slice should not consume a slot.
+- **Level-match slices** so pads play back at comparable loudness.
+
+**Simplicity check:** all invisible. No new controls, slices just get better.
+
+---
+
+## 4. Stem slicing
 
 Suggested by a friend of Dan's: slice *stems* rather than one mixed signal, so a
 pad can hold (say) just the drums or just the bass out of the incoming audio.
@@ -69,7 +139,7 @@ not add a mode.
 
 ---
 
-## 3. Slices that look like what they sound like
+## 5. Slices that look like what they sound like
 
 Two small display ideas, no new controls.
 
@@ -87,7 +157,7 @@ Two small display ideas, no new controls.
 
 ---
 
-## 4. Revisit the iOS slice-length ceiling
+## 6. Revisit the iOS slice-length ceiling
 
 `maxSliceSeconds` is 2 s on iOS against 10 s on desktop, which took the buffer
 allocation from ~66 MB to ~13 MB — necessary, because an AUv3 shares a host with
