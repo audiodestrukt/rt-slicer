@@ -100,6 +100,14 @@ juce_add_plugin(${PROJECT_NAME}
     VERSION ${SLICER_VERSION}
     BUILD_VERSION ${SLICER_BUILD_VERSION}
 
+    # On iOS, juceaide turns this single 1024x1024 PNG into an Images.xcassets
+    # with a full AppIcon set and sets ASSETCATALOG_COMPILER_APPICON_NAME, which
+    # is what produces the CFBundleIconName key. Without it App Store Connect
+    # rejects the upload outright ("Missing Info.plist value ... CFBundleIconName"
+    # plus a missing-icon error per required size) even though the archive
+    # itself builds and signs cleanly. Regenerate with Resources/make_icon.py.
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/icon.png"
+
     FORMATS ${SLICER_FORMATS}
     PRODUCT_NAME ${PLUGIN_NAME}
 )
